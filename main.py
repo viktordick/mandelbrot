@@ -1,11 +1,9 @@
 #!/usr/bin/python
 
-from sys import stdout
-from dataclasses import dataclass
 from math import log
-from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+import threading
 
 np.warnings.filterwarnings('ignore')
 
@@ -20,24 +18,54 @@ ymin = -1.5
 ymax = 1.5
 ndata = 1024
 max_iter = 50
-esc_radius = 20
+esc_radius = 10 
 
-c = complex_matrix(xmin, xmax, ymin, ymax, ndata)
-z = np.zeros_like(c, dtype=float)
-result = np.ones_like(z)
-diverged = np.zeros_like(c, dtype=bool)
+class Mandelbrot(threading.Thread):
+    def __init__(self):
+        self.iteration = 0
+        self.finished = False
+        self.data = np.zeros((ndata, ndata))
+        super().__init__()
 
-for iteration in range(max_iter):
-    print(iteration)
-    z = z ** 2 + c
-    diverged_new = (abs(z) > esc_radius)
-    np.copyto(
-        result,
-        (iteration + 1 - np.log(np.log(abs(z)))/log(2)) / max_iter,
-        where=diverged_new,
-    )
-    np.copyto(diverged, True, where=diverged_new)
-    np.copyto(z, 2, where=diverged)
+    def run(self):
+        c = complex_matrix(xmin, xmax, ymin, ymax, ndata)
+        z = np.zeros_like(c, dtype=float)
+        result = np.ones_like(z)
+        diverged = np.zeros_like(c, dtype=bool)
 
-plt.imshow(result, 'Greys', extent=(xmin, xmax, ymin, ymax))
+        while self.iteration < max_iter:
+            print(self.iteration)
+            z = z ** 2 + c
+            diverged_new = (abs(z) > esc_radius)
+            np.copyto(
+                result,
+                (self.iteration + 1 - np.log(np.log(abs(z)))/log(2)) / max_iter,
+                where=diverged_new,
+            )
+            np.copyto(diverged, True, where=diverged_new)
+            np.copyto(z, 2, where=diverged)
+
+            self.data = result.copy()
+            self.iteration += 1
+
+        self.finished = True
+
+mandelbrot = Mandelbrot()
+mandelbrot.start()
+
+plt.ion()
+plt.show()
+drawn = 0
+while True:
+    if mandelbrot.iteration > drawn:
+        drawn = mandelbrot.iteration
+        print('Drawing', drawn)
+        plt.imshow(mandelbrot.data, 'Greys', extent=(xmin, xmax, ymin, ymax))
+    elif mandelbrot.finished:
+        break
+    plt.pause(1)
+
+mandelbrot.join()
+
+plt.ioff()
 plt.show()
