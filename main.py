@@ -9,10 +9,11 @@ import pygame
 
 WIDTH = 1024
 HEIGHT = 768
-max_iter = 50
-esc_radius = 20
+esc_radius = 100
 
 running = True
+
+np.warnings.filterwarnings('ignore')
 
 
 class Mandelbrot(threading.Thread):
@@ -29,29 +30,41 @@ class Mandelbrot(threading.Thread):
             if rect != self.rect:
                 rect = self.rect
                 print(int(2-log(rect[1]-rect[0])/log(2)), *rect)
+                max_iter = 30*max(1, int(2-log(rect[1]-rect[0])/log(2)))
+                iteration = 0
+                deviation = 0
+                starttime = time.monotonic()
                 self.data = None
                 re = np.linspace(rect[0], rect[1], WIDTH, dtype=np.longdouble)
                 im = np.linspace(rect[2], rect[3], HEIGHT, dtype=np.longdouble)
                 c = re[:, np.newaxis] + im[np.newaxis, :] * 1j
-                z = np.zeros_like(c, dtype=np.longdouble)
+                z = np.zeros_like(c, dtype=np.complex256)
                 result = np.ones_like(z)
                 diverged = np.zeros_like(c, dtype=bool)
-                iteration = 0
+                diverged_new = np.zeros_like(c, dtype=bool)
 
-            if iteration >= max_iter:
+            if (deviation > 0 and deviation < 10) or iteration >= max_iter:
+                if starttime is not None:
+                    print(time.monotonic() - starttime)
+                    starttime = None
                 time.sleep(1)
                 continue
 
-            z = z ** 2 + c
-            diverged_new = (abs(z) > esc_radius)
+            np.copyto(z, z**2+c)
+            np.logical_and(
+                abs(z) > esc_radius,
+                np.logical_not(diverged),
+                out=diverged_new,
+            )
+            deviation = diverged_new.sum()
             np.copyto(
                 result,
                 (iteration + 1 - np.log(np.log(abs(z)))/log(2)) / max_iter,
                 where=diverged_new,
             )
             np.copyto(diverged, True, where=diverged_new)
-            np.copyto(z, 2, where=diverged)
-            self.data = (257*256+1) * np.array(128*result, dtype=np.uint32)
+            # Convert to greyscale
+            self.data = (257*256+1) * np.array(128*(1-result), dtype=np.uint32)
             iteration += 1
 
     def draw(self, screen):
@@ -79,8 +92,8 @@ class Zoom:
 
     def update(self, event, rect):
         if event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN):
-            self.x = min(event.pos[0] - WIDTH/4, WIDTH/2)
-            self.y = min(event.pos[1] - HEIGHT/4, HEIGHT/2)
+            self.x = max(0, min(event.pos[0] - WIDTH/4, WIDTH/2))
+            self.y = max(0, min(event.pos[1] - HEIGHT/4, HEIGHT/2))
         if event.type == pygame.MOUSEBUTTONDOWN:
             w = (rect[1]-rect[0])
             h = (rect[3]-rect[2])
