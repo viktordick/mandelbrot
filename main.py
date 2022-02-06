@@ -9,7 +9,7 @@ import pygame
 
 WIDTH = 1024
 HEIGHT = 768
-esc_radius = 100
+esc_radius = 1000
 
 running = True
 
@@ -19,12 +19,18 @@ np.warnings.filterwarnings('ignore')
 class Mandelbrot(threading.Thread):
     def __init__(self, xmin, xmax, ymin, ymax):
         self.rect = (xmin, xmax, ymin, ymax)
-        self.data = None
+        self.ready = False
         self.surface = pygame.Surface((WIDTH, HEIGHT), depth=24)
         super().__init__()
 
     def run(self):
         rect = None
+        c = np.zeros((WIDTH, HEIGHT), dtype=np.complex256)
+        z = np.zeros_like(c)
+        bounded = np.ones_like(c, dtype=bool)
+        diverged = np.zeros_like(bounded)
+        tmp = np.ones_like(z, dtype=np.longdouble)
+        self.result = np.ones_like(z, dtype=np.uint32)
 
         while running:
             if rect != self.rect:
@@ -34,14 +40,13 @@ class Mandelbrot(threading.Thread):
                 iteration = 0
                 deviation = 0
                 starttime = time.monotonic()
-                self.data = None
                 re = np.linspace(rect[0], rect[1], WIDTH, dtype=np.longdouble)
                 im = np.linspace(rect[2], rect[3], HEIGHT, dtype=np.longdouble)
                 c = re[:, np.newaxis] + im[np.newaxis, :] * 1j
-                z = np.zeros_like(c, dtype=np.complex256)
-                result = np.ones_like(z)
-                diverged = np.zeros_like(c, dtype=bool)
-                diverged_new = np.zeros_like(c, dtype=bool)
+                np.copyto(z, 0)
+                np.copyto(self.result, 0)
+                np.copyto(bounded, True)
+                np.copyto(diverged, False)
 
             if (deviation > 0 and deviation < 10) or iteration >= max_iter:
                 if starttime is not None:
@@ -50,27 +55,30 @@ class Mandelbrot(threading.Thread):
                 time.sleep(1)
                 continue
 
-            np.copyto(z, z**2+c)
-            np.logical_and(
-                abs(z) > esc_radius,
-                np.logical_not(diverged),
-                out=diverged_new,
-            )
-            deviation = diverged_new.sum()
-            np.copyto(
-                result,
-                (iteration + 1 - np.log(np.log(abs(z)))/log(2)) / max_iter,
-                where=diverged_new,
-            )
-            np.copyto(diverged, True, where=diverged_new)
-            # Convert to greyscale
-            self.data = (257*256+1) * np.array(128*(1-result), dtype=np.uint32)
+            z = z**2 + c
+            np.logical_and(abs(z) > esc_radius, bounded, out=diverged)
+            deviation = diverged.sum()
+
+            # steps = iteration + 1 - log(log(abs(z)))/log(2)
+            # grey = steps/max_iter (0: diverging/white, 1: bounded, black)
+            # rgb = 0x10101 * 128*(1-grey)
+            np.abs(z, out=tmp, where=diverged)
+            np.log(tmp, out=tmp, where=diverged)
+            np.log(tmp, out=tmp, where=diverged)
+            np.multiply(tmp, 128/log(2)/max_iter, out=tmp, where=diverged)
+            np.subtract(tmp, 128*((iteration+1)/max_iter-1), out=tmp, where=diverged)
+            np.floor(tmp, out=tmp, where=diverged)
+            np.multiply(0x10101, tmp, out=tmp, where=diverged)
+            np.copyto(self.result, tmp, where=diverged, casting='unsafe')
+
+            np.copyto(bounded, False, where=diverged)
+            self.ready = True
             iteration += 1
 
     def draw(self, screen):
-        if self.data is not None:
-            pygame.surfarray.blit_array(self.surface, self.data)
-            self.data = None
+        if self.ready:
+            pygame.surfarray.blit_array(self.surface, self.result)
+            self.ready = False
 
         screen.blit(self.surface, (0, 0))
 
