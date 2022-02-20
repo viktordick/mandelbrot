@@ -9,7 +9,7 @@ const int HEIGHT = 768;
 const int SIZE = WIDTH*HEIGHT;
 const double ESC_RADIUS = 1000;
 
-typedef std::complex<double> Complex;
+typedef std::complex<long double> Complex;
 
 template<typename T>
 struct Vec2D {
@@ -32,9 +32,30 @@ struct Vec2D {
     }
 };
 
+struct Rect {
+    long double x, y, w, h;
+    Rect(
+        long double _x=-3,
+        long double _y=-1.5,
+        long double _w=4,
+        long double _h=3
+    ) {
+        x=_x; y=_y, w=_w, h=_h;
+    }
+};
+
+struct Zoom: SDL_Rect {
+    Zoom() {
+        x = 0;
+        y = 0;
+        w = WIDTH/2;
+        h = HEIGHT/2;
+    }
+};
+
 
 struct Mandelbrot {
-    double x1, x2, y1, y2;
+    Rect rect;
     int max_iter;
     Vec2D<Complex> c;
     Vec2D<Complex> z;
@@ -46,22 +67,18 @@ struct Mandelbrot {
         max_iter = 30;
         diverged.resize(SIZE);
         bounded.resize(SIZE);
-        init(-3, 1, -1.5, 1.5);
+        init(Rect());
     }
 
-    void init(double _x1, double _x2, double _y1, double _y2) {
-        x1 = _x1;
-        x2 = _x2;
-        y1 = _y1;
-        y2 = _y2;
-
-        double stepx = (x2-x1)/WIDTH;
-        double stepy = (y2-y1)/HEIGHT;
+    void init(const Rect &_rect) {
+        rect = _rect;
+        max_iter = 30*std::max(1, int(2-log(rect.w)/log(2)));
+        std::cout << rect.x << ' ' << rect.y << ' ' << rect.w << ' ' << rect.h << '\n';
 
 #pragma omp parallel for
         for (int i=0; i<WIDTH; i++)
             for (int j=0; j<HEIGHT; j++)
-                c(i,j) = Complex(x1 + i*stepx, y1+j*stepy);
+                c(i,j) = Complex(rect.x + i*rect.w/WIDTH, rect.y+j*rect.h/HEIGHT);
 
 #pragma omp parallel for
         for (int i=0; i<SIZE; i++) {
@@ -86,13 +103,40 @@ struct Mandelbrot {
                 if (bounded[i] && std::norm(z[i]) > ESC_RADIUS) {
                     diverged[i] = true;
                     result += 1;
-                    double fiter = iter + 1 - log(log(std::abs(z[i])))/log(2);
+                    long double fiter = iter + 1 - log(log(std::abs(z[i])))/log(2);
                     surface[i] = 0x10101 * uint32_t(128*(1-fiter/max_iter));
                     break;
                 }
             }
         }
         return result;
+    }
+
+    /* Check for zooming event and return if a redraw is necessary */
+    bool handle_event(SDL_Event &event, const Zoom &zoom) {
+        if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                Rect new_rect(
+                    rect.x+rect.w/WIDTH*zoom.x,
+                    rect.y+rect.h/HEIGHT*zoom.y,
+                    rect.w/WIDTH*zoom.w,
+                    rect.h/HEIGHT*zoom.h
+                );
+                init(new_rect);
+                return true;
+            };
+            if (event.button.button == SDL_BUTTON_RIGHT) {
+                Rect new_rect(
+                    rect.x-rect.w/2,
+                    rect.y-rect.h/2,
+                    rect.w*2,
+                    rect.h*2
+                );
+                init(new_rect);
+                return true;
+            };
+        }
+        return false;
     }
 };
 
@@ -111,6 +155,7 @@ struct Timer {
 
 class Framework{
 public:
+    bool running = true;
     // Contructor which initialize the parameters.
     Framework() {
         SDL_Init(SDL_INIT_VIDEO);       // Initializing SDL as Video
@@ -125,6 +170,7 @@ public:
             SDL_TEXTUREACCESS_STREAMING,
             WIDTH, HEIGHT
         );
+        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
     }
 
     void delay() const {
@@ -138,7 +184,22 @@ public:
     void flip() {
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderDrawRect(renderer, &zoom);
         SDL_RenderPresent(renderer);
+    }
+
+    void handle_event(SDL_Event &event) {
+        if (event.type == SDL_QUIT) {
+            running = false;
+        }
+        if (event.type == SDL_MOUSEMOTION) {
+            zoom.x = std::max(0, std::min(event.motion.x - WIDTH/4, WIDTH/2));
+            zoom.y = std::max(0, std::min(event.motion.y - HEIGHT/4, HEIGHT/2));
+        }
+    }
+
+    const Zoom &current_zoom() const {
+        return zoom;
     }
 
     // Destructor
@@ -152,28 +213,27 @@ private:
     SDL_Renderer *renderer = NULL;      // Pointer for the renderer
     SDL_Window *window = NULL;      // Pointer for the window
     SDL_Texture *texture = NULL;
+    Zoom zoom;
 };
 
 int main() {
+    std::cout.precision(20);
     Framework fw;
     Mandelbrot mb;
 
     SDL_Event event;
-    bool running = true;
-    bool drawn = false;
-    while (running) {
-        if (!drawn) {
+    bool redraw = true;
+    while (fw.running) {
+        if (redraw) {
             mb.steps();
             fw.draw(&mb.surface[0]);
-            fw.flip();
-            drawn = true;
+            redraw = false;
         }
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = false;
-                break;
-            }
+            fw.handle_event(event);
+            redraw = mb.handle_event(event, fw.current_zoom());
         }
-        SDL_Delay(50);
+        fw.flip();
+        SDL_Delay(10);
     }
 }
