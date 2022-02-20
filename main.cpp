@@ -2,6 +2,7 @@
 #include <vector>
 #include <complex>
 #include <chrono>
+#include <SDL2/SDL.h>
 
 const int WIDTH = 1024;
 const int HEIGHT = 768;
@@ -17,10 +18,10 @@ struct Vec2D {
         _data.resize(WIDTH*HEIGHT);
     }
     T& operator()(int x, int y) {
-        return _data[HEIGHT*x+y];
+        return _data[WIDTH*y+x];
     }
     const T& operator()(int x, int y) const {
-        return _data[HEIGHT*x+y];
+        return _data[WIDTH*y+x];
     }
 
     T& operator[](int i) {
@@ -34,6 +35,7 @@ struct Vec2D {
 
 struct Mandelbrot {
     double x1, x2, y1, y2;
+    int max_iter;
     Vec2D<Complex> c;
     Vec2D<Complex> z;
     std::vector<bool> diverged;
@@ -41,6 +43,7 @@ struct Mandelbrot {
     Vec2D<uint32_t> surface;
 
     Mandelbrot() {
+        max_iter = 30;
         diverged.resize(SIZE);
         bounded.resize(SIZE);
         init(-3, 1, -1.5, 1.5);
@@ -70,21 +73,21 @@ struct Mandelbrot {
 
     }
 
-    /* Do some step in the iteration, returning how many points newly diverged
+    /* Iterate each point up to max_iter
      */
-    int steps(int iteration) {
+    int steps() {
         int result = 0;
 #pragma omp parallel for reduction(+:result)
         for (int i=0; i<SIZE; i++) {
             if (diverged[i])
                 continue;
-            for (int iter = 0; iter<100; iter++) {
+            for (int iter=0; iter<max_iter; iter++) {
                 z[i] = z[i]*z[i] + c[i];
                 if (bounded[i] && std::norm(z[i]) > ESC_RADIUS) {
                     diverged[i] = true;
                     result += 1;
-                    double grey = iteration + 1 - log(log(std::abs(z[i])))/log(2);
-                    surface[i] = 0x10101 * uint32_t(128*grey);
+                    double fiter = iter + 1 - log(log(std::abs(z[i])))/log(2);
+                    surface[i] = 0x10101 * uint32_t(128*(1-fiter/max_iter));
                     break;
                 }
             }
@@ -105,13 +108,72 @@ struct Timer {
     }
 };
 
-int main() {
-    Mandelbrot mb;
-    Timer t;
-    for (int i=0; i<50; i++) {
-        mb.steps(i);
-        //std::cout << mb.step(i) << '\n';
+
+class Framework{
+public:
+    // Contructor which initialize the parameters.
+    Framework() {
+        SDL_Init(SDL_INIT_VIDEO);       // Initializing SDL as Video
+        SDL_CreateWindowAndRenderer(WIDTH, HEIGHT, 0, &window, &renderer);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);      // setting draw color
+        SDL_RenderClear(renderer);      // Clear the newly created window
+        SDL_RenderPresent(renderer);    // Reflects the changes done in the
+                                        //  window.
+        texture = SDL_CreateTexture(
+            renderer,
+            SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_STREAMING,
+            WIDTH, HEIGHT
+        );
     }
-    std::cout << t.elapsed() << "ms\n";
-    std::cout << "Done\n";
+
+    void delay() const {
+        SDL_Delay(10);
+    }
+
+    void draw(uint32_t* data) {
+        SDL_UpdateTexture(texture, NULL, data, 4*WIDTH);
+    };
+
+    void flip() {
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderPresent(renderer);
+    }
+
+    // Destructor
+    ~Framework(){
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+    }
+
+private:
+    SDL_Renderer *renderer = NULL;      // Pointer for the renderer
+    SDL_Window *window = NULL;      // Pointer for the window
+    SDL_Texture *texture = NULL;
+};
+
+int main() {
+    Framework fw;
+    Mandelbrot mb;
+
+    SDL_Event event;
+    bool running = true;
+    bool drawn = false;
+    while (running) {
+        if (!drawn) {
+            mb.steps();
+            fw.draw(&mb.surface[0]);
+            fw.flip();
+            drawn = true;
+        }
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+                break;
+            }
+        }
+        SDL_Delay(50);
+    }
 }
