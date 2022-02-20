@@ -19,61 +19,82 @@ np.warnings.filterwarnings('ignore')
 class Mandelbrot(threading.Thread):
     def __init__(self, xmin, xmax, ymin, ymax):
         self.rect = (xmin, xmax, ymin, ymax)
+        self.max_iter = 30
+        self.deviation = 0
+        self.iteration = 0
         self.ready = False
+        self.c = np.zeros((WIDTH, HEIGHT), dtype=np.complex256)
+        self.z = np.zeros_like(self.c)
+        self.bounded = np.ones_like(self.c, dtype=bool)
+        self.diverged = np.zeros_like(self.bounded)
+        self.tmp = np.ones_like(self.z, dtype=np.longdouble)
+        self.result = np.ones_like(self.z, dtype=np.uint32)
         self.surface = pygame.Surface((WIDTH, HEIGHT), depth=24)
+        self.event = threading.Event()
+        self.event.set()
         super().__init__()
 
+    def reset(self):
+        """
+        Reset fields to compute for a newly set rect
+        """
+        rect = self.rect
+        print(int(2-log(rect[1]-rect[0])/log(2)), *rect)
+        self.max_iter = 30*max(1, int(2-log(rect[1]-rect[0])/log(2)))
+        self.deviation = 0
+        re = np.linspace(rect[0], rect[1], WIDTH, dtype=np.longdouble)
+        im = np.linspace(rect[2], rect[3], HEIGHT, dtype=np.longdouble)
+        self.c = re[:, np.newaxis] + im[np.newaxis, :] * 1j
+        np.copyto(self.z, 0)
+        np.copyto(self.result, 0)
+        np.copyto(self.bounded, True)
+        np.copyto(self.diverged, False)
+        self.iteration = 0
+
+    def step(self):
+        self.z = self.z**2 + self.c
+        np.logical_and(np.abs(self.z) > esc_radius, self.bounded,
+                       out=self.diverged)
+        self.deviation = self.diverged.sum()
+
+        # steps = iteration + 1 - log(log(abs(z)))/log(2)
+        # grey = steps/max_iter (0: diverging/white, 1: bounded, black)
+        # rgb = 0x10101 * 128*(1-grey)
+        np.abs(self.z, out=self.tmp, where=self.diverged)
+        np.log(self.tmp, out=self.tmp, where=self.diverged)
+        np.log(self.tmp, out=self.tmp, where=self.diverged)
+        np.multiply(self.tmp, 128/log(2)/self.max_iter, out=self.tmp,
+                    where=self.diverged)
+        np.subtract(self.tmp, 128*((self.iteration+1)/self.max_iter-1),
+                    out=self.tmp, where=self.diverged)
+        np.floor(self.tmp, out=self.tmp, where=self.diverged)
+        np.multiply(0x10101, self.tmp, out=self.tmp, where=self.diverged)
+        np.copyto(self.result, self.tmp, where=self.diverged, casting='unsafe')
+
+        np.copyto(self.bounded, False, where=self.diverged)
+        self.ready = True
+        self.iteration += 1
+
+    def finished(self):
+        return (
+            (self.deviation > 0 and self.deviation < 10) or
+            (self.iteration >= self.max_iter)
+        )
+
     def run(self):
-        rect = None
-        c = np.zeros((WIDTH, HEIGHT), dtype=np.complex256)
-        z = np.zeros_like(c)
-        bounded = np.ones_like(c, dtype=bool)
-        diverged = np.zeros_like(bounded)
-        tmp = np.ones_like(z, dtype=np.longdouble)
-        self.result = np.ones_like(z, dtype=np.uint32)
-
         while running:
-            if rect != self.rect:
-                rect = self.rect
-                print(int(2-log(rect[1]-rect[0])/log(2)), *rect)
-                max_iter = 30*max(1, int(2-log(rect[1]-rect[0])/log(2)))
-                iteration = 0
-                deviation = 0
+            if self.event.is_set():
+                self.event.clear()
+                self.reset()
                 starttime = time.monotonic()
-                re = np.linspace(rect[0], rect[1], WIDTH, dtype=np.longdouble)
-                im = np.linspace(rect[2], rect[3], HEIGHT, dtype=np.longdouble)
-                c = re[:, np.newaxis] + im[np.newaxis, :] * 1j
-                np.copyto(z, 0)
-                np.copyto(self.result, 0)
-                np.copyto(bounded, True)
-                np.copyto(diverged, False)
 
-            if (deviation > 0 and deviation < 10) or iteration >= max_iter:
+            if self.finished():
                 if starttime is not None:
                     print(time.monotonic() - starttime)
                     starttime = None
-                time.sleep(1)
+                self.event.wait(timeout=1)
                 continue
-
-            z = z**2 + c
-            np.logical_and(abs(z) > esc_radius, bounded, out=diverged)
-            deviation = diverged.sum()
-
-            # steps = iteration + 1 - log(log(abs(z)))/log(2)
-            # grey = steps/max_iter (0: diverging/white, 1: bounded, black)
-            # rgb = 0x10101 * 128*(1-grey)
-            np.abs(z, out=tmp, where=diverged)
-            np.log(tmp, out=tmp, where=diverged)
-            np.log(tmp, out=tmp, where=diverged)
-            np.multiply(tmp, 128/log(2)/max_iter, out=tmp, where=diverged)
-            np.subtract(tmp, 128*((iteration+1)/max_iter-1), out=tmp, where=diverged)
-            np.floor(tmp, out=tmp, where=diverged)
-            np.multiply(0x10101, tmp, out=tmp, where=diverged)
-            np.copyto(self.result, tmp, where=diverged, casting='unsafe')
-
-            np.copyto(bounded, False, where=diverged)
-            self.ready = True
-            iteration += 1
+            self.step()
 
     def draw(self, screen):
         if self.ready:
@@ -81,6 +102,13 @@ class Mandelbrot(threading.Thread):
             self.ready = False
 
         screen.blit(self.surface, (0, 0))
+
+    def timeit(self):
+        self.reset()
+        t = time.monotonic()
+        for i in range(100):
+            self.step()
+        print(time.monotonic() - t)
 
 
 class Zoom:
@@ -128,6 +156,9 @@ pygame.init()
 clock = pygame.time.Clock()
 
 mandelbrot = Mandelbrot(-3, 1, -1.5, 1.5)
+# mandelbrot.timeit()
+# assert False
+
 mandelbrot.start()
 
 zoom = Zoom()
@@ -142,8 +173,12 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+            mandelbrot.event.set()
             break
-        mandelbrot.rect = zoom.update(event, mandelbrot.rect)
+        rect = zoom.update(event, mandelbrot.rect)
+        if rect != mandelbrot.rect:
+            mandelbrot.rect = rect
+            mandelbrot.event.set()
 
     mandelbrot.draw(screen)
     zoom.draw(screen)
