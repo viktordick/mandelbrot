@@ -56,6 +56,8 @@ struct Zoom: SDL_Rect {
 
 struct Mandelbrot {
     Rect rect;
+    bool redraw;
+    int step;
     int max_iter;
     Vec2D<Complex> c;
     Vec2D<Complex> z;
@@ -71,9 +73,12 @@ struct Mandelbrot {
     }
 
     void init(const Rect &_rect) {
+        step = 0;
+        redraw = true;
         rect = _rect;
-        max_iter = 30*std::max(1, int(2-log(rect.w)/log(2)));
-        std::cout << rect.x << ' ' << rect.y << ' ' << rect.w << ' ' << rect.h << '\n';
+        max_iter = std::max(1, int(2-log(rect.w)/log(2)));
+        std::cout << max_iter << ' ' << rect.x << ' ' << rect.y << ' ' <<
+            rect.w << ' ' << rect.h << '\n';
 
 #pragma omp parallel for
         for (int i=0; i<WIDTH; i++)
@@ -93,27 +98,32 @@ struct Mandelbrot {
     /* Iterate each point up to max_iter
      */
     int steps() {
+        if (step >= max_iter) {
+            redraw = false;
+            return 0;
+        }
         int result = 0;
 #pragma omp parallel for reduction(+:result)
         for (int i=0; i<SIZE; i++) {
             if (diverged[i])
                 continue;
-            for (int iter=0; iter<max_iter; iter++) {
+            for (int iter=30*step; iter<30*(step+1); iter++) {
                 z[i] = z[i]*z[i] + c[i];
                 if (bounded[i] && std::norm(z[i]) > ESC_RADIUS) {
                     diverged[i] = true;
                     result += 1;
                     long double fiter = iter + 1 - log(log(std::abs(z[i])))/log(2);
-                    surface[i] = 0x10101 * uint32_t(128*(1-fiter/max_iter));
+                    surface[i] = 0x10101 * uint32_t(128*(1-fiter/(30*max_iter)));
                     break;
                 }
             }
         }
+        step += 1;
         return result;
     }
 
-    /* Check for zooming event and return if a redraw is necessary */
-    bool handle_event(SDL_Event &event, const Zoom &zoom) {
+    /* Check for zooming event */
+    void handle_event(SDL_Event &event, const Zoom &zoom) {
         if (event.type == SDL_MOUSEBUTTONDOWN) {
             if (event.button.button == SDL_BUTTON_LEFT) {
                 Rect new_rect(
@@ -123,7 +133,6 @@ struct Mandelbrot {
                     rect.h/HEIGHT*zoom.h
                 );
                 init(new_rect);
-                return true;
             };
             if (event.button.button == SDL_BUTTON_RIGHT) {
                 Rect new_rect(
@@ -133,10 +142,8 @@ struct Mandelbrot {
                     rect.h*2
                 );
                 init(new_rect);
-                return true;
             };
         }
-        return false;
     }
 };
 
@@ -222,18 +229,20 @@ int main() {
     Mandelbrot mb;
 
     SDL_Event event;
-    bool redraw = true;
     while (fw.running) {
-        if (redraw) {
-            mb.steps();
+        bool change = false;
+        mb.steps();
+        if (mb.redraw) {
+            change = true;
             fw.draw(&mb.surface[0]);
-            redraw = false;
         }
         while (SDL_PollEvent(&event)) {
+            change = true;
             fw.handle_event(event);
-            redraw = mb.handle_event(event, fw.current_zoom());
+            mb.handle_event(event, fw.current_zoom());
         }
-        fw.flip();
-        SDL_Delay(10);
+        if (change)
+            fw.flip();
+        SDL_Delay(20);
     }
 }
