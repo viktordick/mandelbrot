@@ -1,8 +1,12 @@
 use std::cmp::{min,max};
 use std::time::Duration;
+use std::thread;
+
 use num_complex::Complex;
 use bitvec::prelude::*;
+use crossbeam::channel::{unbounded,Receiver,Sender};
 
+use sdl2::rect::Rect;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::{Color,PixelFormatEnum};
@@ -11,10 +15,13 @@ use sdl2::gfx::primitives::DrawRenderer;
 const STEPS: usize = 20;
 const WIDTH: usize = 1024;
 const HEIGHT: usize = 768;
-const SIZE: usize = WIDTH*HEIGHT;
 const RADIUS: f64 = 1000.0;
+const NTHREADS: usize = 8;
+const ROWS: usize = HEIGHT/NTHREADS;
+const SIZE: usize = WIDTH*ROWS;
 
 struct Grid {
+    idx: usize,
     step: usize,
     eps: f64,
     c: Vec<Complex<f64>>,
@@ -25,9 +32,10 @@ struct Grid {
 }
 
 impl Grid {
-    fn new(c: Complex<f64>, eps: f64) -> Grid {
+    fn new(idx: usize, c: Complex<f64>, eps: f64) -> Grid {
         let zero = Complex::new(0.0, 0.0);
         let mut grid = Grid {
+            idx: idx,
             step: 0,
             eps: eps,
             c: vec![zero; SIZE],
@@ -36,13 +44,13 @@ impl Grid {
             pixels: vec![0; 4*SIZE],
             zoom_hist: Vec::new(),
         };
-        grid.init(c);
+        grid.init(c + Complex::new(0.0, eps*(idx*ROWS) as f64));
         grid
     }
 
     fn init(&mut self, c: Complex<f64>) {
         self.step = 0;
-        for i in 0..HEIGHT {
+        for i in 0..ROWS {
             for j in 0..WIDTH {
                 self.c[i*WIDTH+j] = c + Complex{
                     re: j as f64 * self.eps,
@@ -98,6 +106,23 @@ impl Grid {
     }
 }
 
+fn work(rcv: Receiver<Option<Grid>>, snd: Sender<Grid>) {
+    loop {
+        let mut grid = match rcv.recv() {
+            Ok(x) => match x {
+                Some(grid) => grid,
+                None => break,
+            },
+            Err(_) => break,
+        };
+        grid.update();
+        match snd.send(grid) {
+            Ok(_) => (),
+            Err(_) => break,
+        };
+    };
+}
+
 pub fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video = sdl_context.video()?;
@@ -114,8 +139,6 @@ pub fn main() -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut grid = Grid::new(Complex{re: -3.0, im: -1.5}, 4.0/WIDTH as f64);
-
     let creator = canvas.texture_creator();
     let mut texture = creator.create_texture_streaming(
         PixelFormatEnum::RGB888,
@@ -123,8 +146,25 @@ pub fn main() -> Result<(), String> {
         HEIGHT as u32,
     ).map_err(|e| e.to_string())?;
 
-    let mut corner = (0usize, 0usize);
+    let (snd_main, rcv_thrd) = unbounded();
+    let (snd_thrd, rcv_main) = unbounded();
+    for _ in 1..NTHREADS {
+        let rcv = rcv_thrd.clone();
+        let snd = snd_thrd.clone();
+        thread::spawn(move || {work(rcv, snd)});
+    }
+    thread::spawn(move || { work(rcv_thrd, snd_thrd); });
 
+    let mut grids = Vec::new();
+    for i in 0..NTHREADS {
+        grids.push(Grid::new(
+            i,
+            Complex::new(-3.0, -1.5),
+            4.0/WIDTH as f64,
+        ));
+    };
+
+    let mut corner = (0usize, 0usize);
     'running: loop {
         for event in event_pump.poll_iter() {
             match event {
@@ -139,20 +179,31 @@ pub fn main() -> Result<(), String> {
                     corner.0 = max(0, min(x - w / 4, w / 2)) as usize /16*16;
                     corner.1 = max(0, min(y - h / 4, h / 2)) as usize /16*16;
                 },
-                Event::MouseButtonDown {..} => {
-                    grid.zoom_in(corner);
-                },
-                Event::KeyDown { keycode: Some(Keycode::Backspace), .. } => {
-                    grid.zoom_out();
-                }
+                //Event::MouseButtonDown {..} => {
+                //    grid.zoom_in(corner);
+                //},
+                //Event::KeyDown { keycode: Some(Keycode::Backspace), .. } => {
+                //    grid.zoom_out();
+                //}
                 _ => continue,
             }
         }
-        grid.update();
-        texture.update(None, &grid.pixels, 4*WIDTH).map_err(|e| e.to_string())?;
+        while let Ok(grid) = rcv_main.try_recv() {
+            texture.update(
+                Rect::new(0, (grid.idx*ROWS) as i32, WIDTH as u32, ROWS as u32),
+                &grid.pixels,
+                4*WIDTH,
+            ).map_err(|e| e.to_string())?;
+            grids.push(grid);
+        };
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
-        canvas.copy(&texture, None, None)?;
+        if grids.len() == NTHREADS {
+            canvas.copy(&texture, None, None)?;
+            while let Some(grid) = grids.pop() {
+                snd_main.send(Some(grid)).map_err(|e| e.to_string())?;
+            };
+        }
         canvas.rectangle(
             corner.0 as i16,
             corner.1 as i16,

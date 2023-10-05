@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 num-complex = "0.4.0"
 bitvec = "1"
+crossbeam = "0.8.2"
 
 [dependencies.sdl2]
 version = "0.35.2"
