@@ -15,7 +15,7 @@ use sdl2::gfx::primitives::DrawRenderer;
 const STEPS: usize = 20;
 const WIDTH: usize = 1024;
 const HEIGHT: usize = 768;
-const RADIUS: f64 = 1000.0;
+const RADIUS: f64 = 1000.;
 const NTHREADS: usize = 8;
 const ROWS: usize = HEIGHT/NTHREADS;
 const SIZE: usize = WIDTH*ROWS;
@@ -28,6 +28,9 @@ struct Grid {
     c: Vec<Complex<f64>>,
     z: Vec<Complex<f64>>,
     diverged: BitVec,
+    diverged_steps: Vec<f32>,
+    minsteps: usize,
+    ref_minsteps: usize,
     pixels: Vec<u8>,
 }
 
@@ -42,13 +45,17 @@ impl Grid {
             c: vec![zero; SIZE],
             z: vec![zero; SIZE],
             diverged: bitvec![0; SIZE],
+            diverged_steps: vec![0.; SIZE],
             pixels: vec![0; 4*SIZE],
+            minsteps: 0,
+            ref_minsteps: 1,
         }
     }
 
     fn init(&mut self) {
         let c = self.anchor + Complex::new(0.0, self.eps*(self.idx * ROWS) as f64);
         self.step = 0;
+        self.minsteps = 0;
         for i in 0..ROWS {
             for j in 0..WIDTH {
                 self.c[i*WIDTH+j] = c + Complex{
@@ -67,6 +74,7 @@ impl Grid {
     }
 
     fn update(&mut self) {
+        let radoff = (RADIUS as f32).ln().log(2.) + 1.;
         for i in 0..SIZE {
             if self.diverged[i] {
                 continue
@@ -75,9 +83,16 @@ impl Grid {
                 self.z[i] = self.z[i] * self.z[i] + self.c[i];
                 let n2 = self.z[i].norm_sqr();
                 if n2 > RADIUS {
+                    if self.minsteps == 0 || self.minsteps > step {
+                        self.minsteps = step;
+                    }
                     self.diverged.set(i, true);
-                    let step = min(self.step + step, 20) as f64 - n2.ln().ln();
-                    let val = 120u8 + (128.0 * step / 20.0) as u8;
+                    let steps = step as f32 - (n2 as f32).ln().log(2.) + radoff;
+                    self.diverged_steps[i] = steps;
+                    let mut scale = (self.ref_minsteps as f32 + 100. - steps) / 100.;
+                    if scale < 0. {scale = 0.};
+                    if scale > 1. {scale = 1.};
+                    let val = 255u8 - (scale * 255.) as u8;
                     for j in 0..3 {
                         self.pixels[4*i+j] = val;
                     }
@@ -87,11 +102,26 @@ impl Grid {
         }
         self.step += STEPS;
     }
+
+    fn redraw(&mut self) {
+        for i in 0..SIZE {
+            let val = if !self.diverged[i] { 0u8 } else {
+                let mut scale = (self.ref_minsteps as f32 + 100. - self.diverged_steps[i]) / 100.;
+                if scale < 0. {scale = 0.};
+                if scale > 1. {scale = 1.};
+                255u8 - (scale * 255.) as u8
+            };
+            for j in 0..3 {
+                self.pixels[4*i+j] = val;
+            }
+        }
+    }
 }
 
 enum Task {
     Update(Grid),
     Init(Grid),
+    Redraw(Grid),
     Terminate,
 }
 
@@ -105,6 +135,7 @@ fn work(rcv: Receiver<Task>, snd: Sender<Grid>) {
             Task::Terminate => break,
             Task::Update(mut grid) => {grid.update(); grid},
             Task::Init(mut grid) => {grid.init(); grid},
+            Task::Redraw(mut grid) => {grid.redraw(); grid},
         };
         match snd.send(grid) {
             Ok(_) => (),
@@ -153,6 +184,8 @@ pub fn main() -> Result<(), String> {
 
     let mut zoom_hist = Vec::new();
     let mut zoom = (anchor, eps);
+    let mut minsteps = [1usize; NTHREADS];
+    let mut ref_minsteps = 1usize;
 
     let mut corner = (0usize, 0usize);
     'running: loop {
@@ -186,7 +219,7 @@ pub fn main() -> Result<(), String> {
             }
         }
         let mut received = 0;
-        while received < NTHREADS{
+        while received < NTHREADS {
             let mut grid = match rcv_main.try_recv() {
                 Err(_) => break,
                 Ok(grid) => grid,
@@ -197,12 +230,21 @@ pub fn main() -> Result<(), String> {
                 &grid.pixels,
                 4*WIDTH,
             ).map_err(|e| e.to_string())?;
+            if minsteps[grid.idx] != grid.minsteps {
+                minsteps[grid.idx] = grid.minsteps;
+                ref_minsteps = minsteps.into_iter().filter(|x| {*x > 0}).min().unwrap_or(1);
+            }
             let task = if (grid.anchor, grid.eps) != zoom {
                 grid.anchor = zoom.0;
                 grid.eps = zoom.1;
                 Task::Init(grid)
             } else {
-                Task::Update(grid)
+                if grid.ref_minsteps != ref_minsteps {
+                    grid.ref_minsteps = ref_minsteps;
+                    Task::Redraw(grid)
+                } else {
+                    Task::Update(grid)
+                }
             };
             snd_main.send(task).map_err(|e| e.to_string())?;
         };
